@@ -2,7 +2,7 @@ name: "Vprofile IAC"
 
 on:
   push:
-    branches: 
+    branches:
       - main
       - stage
     paths:
@@ -35,21 +35,28 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Setup Terraform with specific version on the runner
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.6.3
-      
+
       - name: Terraform Init
-        id: init
-        run: terraform init -backend-config="bucket=${{ env.BUCKET_TF_STATE }}"
+        run: terraform init \
+          -backend-config="bucket=${{ env.BUCKET_TF_STATE }}" \
+          -backend-config="region=${{ env.AWS_REGION }}" \
+          -backend-config="key=terraform.tfstate"
 
       - name: Terraform format
-        id: fmt
-        run: terraform fmt -check
+        run: terraform fmt -check -recursive
 
       - name: Terraform Validate
-        id: validate
         run: terraform validate
 
       - name: Terraform Plan
@@ -60,3 +67,20 @@ jobs:
       - name: Terraform plan status
         if: steps.plan.outcome == 'failure'
         run: exit 1
+
+      - name: Terraform Apply
+        id: apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: terraform apply -no-color -input=false -auto-approve planfile
+
+      - name: Get Kube config file
+        if: steps.apply.outcome == 'success'
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
+
+      - name: Install Ingress Controller
+        if: steps.apply.outcome == 'success'
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.9.0/deploy/static/provider/aws/deploy.yaml
+          kubectl wait --namespace ingress-nginx \
+            --for=condition=available deployment/ingress-nginx-controller \
+            --timeout=120s
